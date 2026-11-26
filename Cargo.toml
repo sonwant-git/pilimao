@@ -20,13 +20,13 @@ repository = "https://github.com/sonwant-git/pilimao"
 
 [workspace.dependencies]
 # Internal workspace crates
-pilimao-dsp = { path = "crates/pilimao-dsp" }
-pilimao-decoder = { path = "crates/pilimao-decoder" }
-pilimao-metadata = { path = "crates/pilimao-metadata" }
-pilimao-playlist = { path = "crates/pilimao-playlist" }
-pilimao-skin-wsz = { path = "crates/pilimao-skin-wsz" }
-pilimao-audio-engine = { path = "crates/pilimao-audio-engine" }
-pilimao-win32-shell = { path = "crates/pilimao-win32-shell" }
+pilimao-dsp = { version = "0.1.0", path = "crates/pilimao-dsp" }
+pilimao-decoder = { version = "0.1.0", path = "crates/pilimao-decoder" }
+pilimao-metadata = { version = "0.1.0", path = "crates/pilimao-metadata" }
+pilimao-playlist = { version = "0.1.0", path = "crates/pilimao-playlist" }
+pilimao-skin-wsz = { version = "0.1.0", path = "crates/pilimao-skin-wsz" }
+pilimao-audio-engine = { version = "0.1.0", path = "crates/pilimao-audio-engine" }
+pilimao-win32-shell = { version = "0.1.0", path = "crates/pilimao-win32-shell" }
 
 # Audio / DSP / Media
 rubato = { version = "0.16", default-features = false, features = ["fft_resampler"] }

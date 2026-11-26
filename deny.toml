@@ -37,6 +37,7 @@ license-files = [{ path = "COPYRIGHT", hash = 0x39f8ad31 }]
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
