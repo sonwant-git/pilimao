@@ -1,0 +1,104 @@
+name: CI & Windows Portable Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test-linux:
+    name: Linux Fmt / Clippy / Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (Linux workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy (Windows MSVC target typecheck)
+        run: cargo clippy --workspace --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Run unit & integration tests
+        run: cargo test --workspace
+
+      - name: Run CLI self-test & inspect-skin smoke check
+        run: |
+          cargo run -p pilimao-app -- self-test
+          cargo run -p pilimao-app -- inspect-skin default
+
+  deny:
+    name: Cargo Deny (Licenses & Advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features check licenses bans sources
+
+  windows-msvc-portable:
+    name: Windows MSVC Test & Portable ZIP
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable MSVC toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (Windows MSVC native)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests on Windows
+        run: cargo test --workspace
+
+      - name: Build Windows MSVC release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc -p pilimao-app
+
+      - name: Run release self-test
+        run: .\target\x86_64-pc-windows-msvc\release\pilimao.exe self-test
+
+      - name: Assemble Windows Portable ZIP
+        shell: pwsh
+        run: |
+          $stage = "dist/pilimao-windows-x86_64-portable"
+          New-Item -ItemType Directory -Force -Path "$stage/skins" | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/pilimao.exe" "$stage/pilimao.exe"
+          Copy-Item "LICENSE" "$stage/LICENSE"
+          Copy-Item "README.md" "$stage/README.md"
+          Set-Content -Path "$stage/portable.ini" -Value "; Presence of portable.ini enables Portable Mode (stores pilimao.ini/pilimao.eqf/pilimao.m3u8 beside pilimao.exe)`r`n"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/pilimao-windows-x86_64-portable.zip" -Force
+
+      - name: Upload Windows Portable ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilimao-windows-x86_64-portable
+          path: dist/pilimao-windows-x86_64-portable.zip
+          if-no-files-found: error

@@ -1,0 +1,26 @@
+[package]
+name = "pilimao-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pilimao music player binary with Portable Mode (portable.ini) and CLI diagnostic tools"
+
+[[bin]]
+name = "pilimao"
+path = "src/main.rs"
+
+[dependencies]
+pilimao-dsp.workspace = true
+pilimao-decoder.workspace = true
+pilimao-metadata.workspace = true
+pilimao-playlist.workspace = true
+pilimao-skin-wsz.workspace = true
+pilimao-audio-engine.workspace = true
+pilimao-win32-shell.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

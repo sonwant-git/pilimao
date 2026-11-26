@@ -1,0 +1,21 @@
+[package]
+name = "pilimao-audio-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lock-free rtrb + triple_buffer audio engine with Windows WASAPI Shared/Exclusive + MMCSS Pro Audio and cross-platform Null Sink"
+
+[dependencies]
+pilimao-dsp.workspace = true
+pilimao-decoder.workspace = true
+rtrb.workspace = true
+triple_buffer.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[lints]
+workspace = true

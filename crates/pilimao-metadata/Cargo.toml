@@ -1,0 +1,17 @@
+[package]
+name = "pilimao-metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Audio tag and ReplayGain 2.0 parser with legacy Big5/GBK/Shift-JIS mojibake restoration"
+
+[dependencies]
+lofty.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

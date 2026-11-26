@@ -1,0 +1,16 @@
+[package]
+name = "pilimao-skin-wsz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lenient Winamp 2.x .wsz skin loader, region/viscolor/pledit parsers, clean-room default skin, and 3-window magnetic docking/BFS/Windowshade engine"
+
+[dependencies]
+zip.workspace = true
+image.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

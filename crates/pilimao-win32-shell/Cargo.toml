@@ -1,0 +1,21 @@
+[package]
+name = "pilimao-win32-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "1x/2x/3x nearest-neighbor BGRA renderer and borderless 3-window Win32 shell with SetWindowRgn, BeginDeferWindowPos, WM_DROPFILES, and shortcuts"
+
+[dependencies]
+pilimao-skin-wsz.workspace = true
+pilimao-playlist.workspace = true
+pilimao-dsp.workspace = true
+pilimao-audio-engine.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[lints]
+workspace = true

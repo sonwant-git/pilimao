@@ -1,0 +1,16 @@
+[package]
+name = "pilimao-playlist"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "M3U/M3U8/PLS playlists, Winamp binary .eqf presets, shuffle, play queue, and fuzzy jump-to-file"
+
+[dependencies]
+nucleo-matcher.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

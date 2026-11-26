@@ -1,0 +1,15 @@
+[package]
+name = "pilimao-decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-format audio decoder with gapless playback support powered by symphonia"
+
+[dependencies]
+symphonia.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "pilimao-dsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "64-bit precision audio DSP pipeline: 10-band EQ, soft-knee limiter, clickless ramp, TPDF dither, ReplayGain 2.0, Sinc resampler, 19-band FFT spectrum, and Bit-Perfect detection"
+
+[dependencies]
+rubato.workspace = true
+rustfft.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
