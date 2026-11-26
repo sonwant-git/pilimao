@@ -1,4 +1,4 @@
-name: CI & Windows Portable Build
+name: CI & Windows Release Build
 
 on:
   push:
@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -46,19 +49,23 @@ jobs:
           cargo run -p pilimao-app -- inspect-skin default
 
   deny:
-    name: Cargo Deny (Licenses & Advisories)
+    name: Cargo Deny (Licenses & Bans)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          arguments: --all-features check licenses bans sources
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-  windows-msvc-portable:
-    name: Windows MSVC Test & Portable ZIP
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny check licenses bans sources
+
+  windows-msvc-packages:
+    name: Windows MSVC Test, Installer & Portable ZIP
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -79,26 +86,102 @@ jobs:
       - name: Run workspace tests on Windows
         run: cargo test --workspace
 
-      - name: Build Windows MSVC release binary
+      - name: Build Windows MSVC release binary (+crt-static + embedded icon)
         run: cargo build --release --target x86_64-pc-windows-msvc -p pilimao-app
 
       - name: Run release self-test
         run: .\target\x86_64-pc-windows-msvc\release\pilimao.exe self-test
 
+      - name: Resolve package version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}".TrimStart('v')
+          } else {
+            $v = "0.1.0"
+          }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Assemble Windows Portable ZIP
         shell: pwsh
         run: |
-          $stage = "dist/pilimao-windows-x86_64-portable"
+          $ver = "${{ steps.ver.outputs.version }}"
+          $stage = "dist/pilimao-$ver-windows-x86_64-portable"
           New-Item -ItemType Directory -Force -Path "$stage/skins" | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/pilimao.exe" "$stage/pilimao.exe"
           Copy-Item "LICENSE" "$stage/LICENSE"
           Copy-Item "README.md" "$stage/README.md"
           Set-Content -Path "$stage/portable.ini" -Value "; Presence of portable.ini enables Portable Mode (stores pilimao.ini/pilimao.eqf/pilimao.m3u8 beside pilimao.exe)`r`n"
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/pilimao-windows-x86_64-portable.zip" -Force
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/pilimao-$ver-windows-x86_64-portable.zip" -Force
 
-      - name: Upload Windows Portable ZIP artifact
+      - name: Build One-Click Inno Setup Installer (.exe)
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc) {
+            $candidate = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (Test-Path $candidate) { $iscc = $candidate }
+          }
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DMyAppVersion=$ver" "installer/pilimao.iss"
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          $files = @(
+            "dist/pilimao-$ver-windows-x86_64-setup.exe",
+            "dist/pilimao-$ver-windows-x86_64-portable.zip"
+          )
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
+            $name = Split-Path -Leaf $f
+            "$hash  $name"
+          }
+          Set-Content -Path "dist/SHA256SUMS.txt" -Value ($lines -join "`n")
+
+      - name: Upload Windows release packages as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pilimao-windows-x86_64-portable
-          path: dist/pilimao-windows-x86_64-portable.zip
+          name: pilimao-windows-x86_64-packages
+          path: |
+            dist/pilimao-*-windows-x86_64-setup.exe
+            dist/pilimao-*-windows-x86_64-portable.zip
+            dist/SHA256SUMS.txt
           if-no-files-found: error
+
+  publish-github-release:
+    name: Publish GitHub Release
+    needs: [lint-and-test-linux, deny, windows-msvc-packages]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built Windows packages
+        uses: actions/download-artifact@v4
+        with:
+          name: pilimao-windows-x86_64-packages
+          path: release-assets
+
+      - name: Create public GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## 霹靂貓播放器 Pilimao ${{ github.ref_name }}（Windows 10/11 64-bit）
+
+            ### 下載與安裝
+            - **一般使用者推薦（一鍵安裝精靈）**：下載 `pilimao-*-windows-x86_64-setup.exe`，點兩下即可完成安裝（免系統管理員權限、自動建立桌面捷徑、可勾選關聯音樂檔與 `.wsz` 面板）。
+            - **免安裝綠色版（Portable）**：下載 `pilimao-*-windows-x86_64-portable.zip`，解壓縮後雙擊 `pilimao.exe` 即可使用（內附 `portable.ini`，不寫入登錄檔）。
+
+            > **Windows SmartScreen 提示說明**：本專案為開源免費軟體，未購買商業程式碼簽章憑證。首次執行時若 Windows Defender 跳出「Windows 已保護您的電腦」，請點擊 **「其他資訊」→「仍要執行」**，並可對照 `SHA256SUMS.txt` 驗證檔案完整性。
+          files: |
+            release-assets/*.exe
+            release-assets/*.zip
+            release-assets/SHA256SUMS.txt

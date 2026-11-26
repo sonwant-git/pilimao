@@ -63,6 +63,10 @@ mod win_impl {
         SetWindowRgn, StretchDIBits,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST,
+        OPENFILENAMEW,
+    };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT,
     };
@@ -70,13 +74,13 @@ mod win_impl {
     use windows::Win32::UI::WindowsAndMessaging::{
         BeginDeferWindowPos, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
         DeferWindowPos, DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, IDC_ARROW,
-        LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SPI_GETWORKAREA, SW_HIDE, SW_MINIMIZE,
-        SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, ShowWindow, SystemParametersInfoW,
-        TranslateMessage, WM_CHAR, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_POPUP,
+        LoadCursorW, LoadIconW, MSG, PostQuitMessage, RegisterClassW, SPI_GETWORKAREA, SW_HIDE,
+        SW_MINIMIZE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, ShowWindow,
+        SystemParametersInfoW, TranslateMessage, WM_CHAR, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
+        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_TIMER,
+        WNDCLASSW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_POPUP,
     };
-    use windows::core::{PCWSTR, w};
+    use windows::core::{PCWSTR, PWSTR, w};
 
     use crate::ShellError;
     use crate::hit_test::{EqHit, MainHit, PlHit, hit_test_eq, hit_test_main, hit_test_playlist};
@@ -132,10 +136,13 @@ mod win_impl {
             unsafe { GetModuleHandleW(None) }.map_err(|e| ShellError::Win32(e.to_string()))?;
 
         unsafe {
+            let hicon = LoadIconW(Some(hinstance.into()), PCWSTR(ptr::without_provenance(1)))
+                .unwrap_or_default();
             let wc = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
                 lpfnWndProc: Some(wnd_proc),
                 hInstance: hinstance.into(),
+                hIcon: hicon,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 lpszClassName: class_name,
                 ..Default::default()
@@ -183,7 +190,7 @@ mod win_impl {
             ..Default::default()
         };
 
-        let app = ShellApp {
+        let mut app = ShellApp {
             hwnds,
             skin: config.skin,
             docking,
@@ -210,6 +217,11 @@ mod win_impl {
                 16,
                 None,
             );
+        }
+
+        // If launched by double-clicking an audio file or playlist, start playing right away.
+        if !app.playlist.is_empty() && app.playlist.jump_to(0).is_some() {
+            start_playing_current(&mut app);
         }
 
         SHELL_STATE.with(|slot| {
@@ -449,6 +461,9 @@ mod win_impl {
             ShortcutAction::CycleRepeat => {
                 app.playlist.cycle_repeat();
             }
+            ShortcutAction::OpenFiles => {
+                // Handled outside the SHELL_STATE borrow inside wnd_proc for modal dialog safety.
+            }
             ShortcutAction::OpenJumpToFile => {
                 app.ui.jump_open = !app.ui.jump_open;
                 app.ui.jump_query.clear();
@@ -504,18 +519,67 @@ mod win_impl {
         invalidate_all(app);
     }
 
-    fn handle_drop_files(app: &mut ShellApp, hdrop: HDROP) {
-        let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
-        let mut added_tracks = false;
+    /// Opens the native Windows multi-select file picker dialog (`GetOpenFileNameW`)
+    /// for audio tracks, playlists, `.wsz` skins, and `.eqf` presets.
+    fn open_files_dialog(owner: HWND) -> Vec<PathBuf> {
+        let mut filter: Vec<u16> = "Audio & Playlists (*.mp3;*.flac;*.wav;*.ogg;*.m4a;*.aac;*.m3u;*.m3u8;*.pls)\0*.mp3;*.flac;*.wav;*.ogg;*.m4a;*.aac;*.aiff;*.m3u;*.m3u8;*.pls\0Winamp Skins (*.wsz)\0*.wsz\0Winamp EQ Presets (*.eqf)\0*.eqf\0All Files (*.*)\0*.*\0\0"
+            .encode_utf16()
+            .collect();
+        let title: Vec<u16> = "Open Audio, Playlist, Skin (.wsz), or EQ (.eqf)\0"
+            .encode_utf16()
+            .collect();
+        let mut file_buf = vec![0u16; 32_768];
 
-        for i in 0..count {
-            let len = unsafe { DragQueryFileW(hdrop, i, None) };
-            if len == 0 {
-                continue;
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: owner,
+            lpstrFilter: PCWSTR(filter.as_mut_ptr()),
+            nFilterIndex: 1,
+            lpstrFile: PWSTR(file_buf.as_mut_ptr()),
+            nMaxFile: file_buf.len() as u32,
+            lpstrTitle: PCWSTR(title.as_ptr()),
+            Flags: OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+            ..Default::default()
+        };
+
+        let ok = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
+        if !ok {
+            return Vec::new();
+        }
+
+        // Parse null-separated result buffer:
+        // - Single selection: "<full_path>\0\0"
+        // - Multi selection:  "<dir>\0<name1>\0<name2>\0\0"
+        let mut parts: Vec<OsString> = Vec::new();
+        let mut start = 0usize;
+        while start < file_buf.len() {
+            let end = file_buf[start..]
+                .iter()
+                .position(|&c| c == 0)
+                .map(|rel| start + rel)
+                .unwrap_or(file_buf.len());
+            if end == start {
+                break;
             }
-            let mut buf = vec![0u16; (len + 1) as usize];
-            let copied = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) } as usize;
-            let path = PathBuf::from(OsString::from_wide(&buf[..copied]));
+            parts.push(OsString::from_wide(&file_buf[start..end]));
+            start = end + 1;
+        }
+
+        match parts.len() {
+            0 => Vec::new(),
+            1 => vec![PathBuf::from(&parts[0])],
+            _ => {
+                let dir = PathBuf::from(&parts[0]);
+                parts[1..].iter().map(|name| dir.join(name)).collect()
+            }
+        }
+    }
+
+    fn ingest_paths(app: &mut ShellApp, paths: &[PathBuf]) {
+        let mut added_tracks = false;
+        let was_empty = app.playlist.is_empty();
+
+        for path in paths {
             let ext = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -524,13 +588,13 @@ mod win_impl {
 
             match ext.as_str() {
                 "wsz" => {
-                    if let Ok(new_skin) = load_skin(&path) {
+                    if let Ok(new_skin) = load_skin(path) {
                         app.skin = new_skin;
                         apply_all_window_regions(app);
                     }
                 }
                 "eqf" => {
-                    if let Ok(presets) = load_eqf_file(&path)
+                    if let Ok(presets) = load_eqf_file(path)
                         && let Some(first) = presets.first()
                     {
                         app.ui.eq.enabled = true;
@@ -540,7 +604,7 @@ mod win_impl {
                     }
                 }
                 "m3u" | "m3u8" | "pls" => {
-                    if let Ok(entries) = load_playlist_file(&path) {
+                    if let Ok(entries) = load_playlist_file(path) {
                         app.playlist.extend(entries);
                         added_tracks = true;
                     }
@@ -552,15 +616,34 @@ mod win_impl {
             }
         }
 
+        if added_tracks && (was_empty || app.engine.snapshot().state == PlaybackState::Stopped) {
+            if app.playlist.current_index().is_none() {
+                app.playlist.jump_to(0);
+            }
+            start_playing_current(app);
+        }
+        invalidate_all(app);
+    }
+
+    fn handle_drop_files(app: &mut ShellApp, hdrop: HDROP) {
+        let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+        let mut paths = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let len = unsafe { DragQueryFileW(hdrop, i, None) };
+            if len == 0 {
+                continue;
+            }
+            let mut buf = vec![0u16; (len + 1) as usize];
+            let copied = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) } as usize;
+            paths.push(PathBuf::from(OsString::from_wide(&buf[..copied])));
+        }
+
         unsafe {
             DragFinish(hdrop);
         }
 
-        if added_tracks && app.engine.snapshot().state == PlaybackState::Stopped {
-            app.playlist.jump_to(0);
-            start_playing_current(app);
-        }
-        invalidate_all(app);
+        ingest_paths(app, &paths);
     }
 
     unsafe extern "system" fn wnd_proc(
@@ -570,6 +653,7 @@ mod win_impl {
         lparam: LPARAM,
     ) -> LRESULT {
         let mut handled = false;
+        let mut open_dialog_owner: Option<HWND> = None;
 
         SHELL_STATE.with(|slot| {
             let mut borrow = slot.borrow_mut();
@@ -705,6 +789,7 @@ mod win_impl {
                             }
                             MainHit::Eject => {
                                 app.ui.pressed_transport = Some(5);
+                                open_dialog_owner = Some(app.hwnds[WindowId::Main.index()]);
                             }
                             MainHit::ToggleShuffle => {
                                 handle_shortcut(app, ShortcutAction::ToggleShuffle, win_id);
@@ -868,7 +953,11 @@ mod win_impl {
                             handled = true;
                         }
                     } else if let Some(action) = map_virtual_key(vk, mods) {
-                        handle_shortcut(app, action, win_id);
+                        if action == ShortcutAction::OpenFiles {
+                            open_dialog_owner = Some(app.hwnds[WindowId::Main.index()]);
+                        } else {
+                            handle_shortcut(app, action, win_id);
+                        }
                         handled = true;
                     }
                 }
@@ -893,6 +982,21 @@ mod win_impl {
                 _ => {}
             }
         });
+
+        // Show modal GetOpenFileNameW strictly outside the SHELL_STATE borrow to prevent re-entrancy!
+        if let Some(owner) = open_dialog_owner {
+            let selected = open_files_dialog(owner);
+            SHELL_STATE.with(|slot| {
+                if let Some(app) = slot.borrow_mut().as_mut() {
+                    app.ui.pressed_transport = None;
+                    if !selected.is_empty() {
+                        ingest_paths(app, &selected);
+                    } else {
+                        invalidate_all(app);
+                    }
+                }
+            });
+        }
 
         if handled {
             LRESULT(0)

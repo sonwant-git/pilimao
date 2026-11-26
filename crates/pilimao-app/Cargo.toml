@@ -22,5 +22,11 @@ pilimao-win32-shell.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
 [lints]
 workspace = true

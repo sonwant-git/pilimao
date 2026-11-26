@@ -1,4 +1,5 @@
 //! `pilimao`: Windows 10/11 Native Rust Music Player (paying homage to classic Winamp 2.x).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod cli;
 mod config;
@@ -107,7 +108,34 @@ enum Commands {
     },
 }
 
+#[cfg(windows)]
+fn attach_parent_console_if_needed() {
+    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    let needs_console = std::env::args().skip(1).any(|arg| {
+        matches!(
+            arg.as_str(),
+            "self-test"
+                | "inspect-skin"
+                | "inspect-eqf"
+                | "inspect-track"
+                | "-h"
+                | "--help"
+                | "-V"
+                | "--version"
+                | "help"
+        )
+    });
+    if needs_console {
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    attach_parent_console_if_needed();
+
     let args = Cli::parse();
 
     if let Some(cmd) = args.command {
@@ -134,8 +162,25 @@ fn main() -> anyhow::Result<()> {
         cfg.output_mode = output.into();
     }
 
+    // Detect if user opened a .wsz skin or .eqf preset directly (e.g. via Explorer association)
+    let mut cli_skin: Option<PathBuf> = args.skin.clone();
+    let mut cli_eqf: Option<PathBuf> = None;
+    let mut media_files: Vec<PathBuf> = Vec::new();
+    for file in &args.files {
+        let ext = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        match ext.as_str() {
+            "wsz" => cli_skin = Some(file.clone()),
+            "eqf" => cli_eqf = Some(file.clone()),
+            _ => media_files.push(file.clone()),
+        }
+    }
+
     // Load requested skin, saved skin, or 100% Clean-Room default
-    let skin = if let Some(skin_path) = &args.skin {
+    let skin = if let Some(skin_path) = &cli_skin {
         load_skin(skin_path)
             .with_context(|| format!("failed to load skin '{}'", skin_path.display()))?
     } else if let Some(saved_skin) = &cfg.skin {
@@ -144,19 +189,27 @@ fn main() -> anyhow::Result<()> {
         WszSkin::clean_room_default()
     };
 
-    // Load saved `.eqf` state if present
-    if paths.eqf_path.exists()
-        && let Ok(presets) = load_eqf_file(&paths.eqf_path)
+    // Load CLI or saved `.eqf` state if present
+    let eqf_source = cli_eqf.as_deref().or(if paths.eqf_path.exists() {
+        Some(paths.eqf_path.as_path())
+    } else {
+        None
+    });
+    if let Some(eqf_path) = eqf_source
+        && let Ok(presets) = load_eqf_file(eqf_path)
         && let Some(first) = presets.first()
     {
         cfg.eq.preamp_db = first.preamp_db;
         cfg.eq.bands_db = first.bands_db;
+        if cli_eqf.is_some() {
+            cfg.eq.enabled = true;
+        }
     }
 
     // Build initial playlist from CLI arguments or saved `pilimao.m3u8`
     let mut playlist = Playlist::new();
-    if !args.files.is_empty() {
-        for file in &args.files {
+    if !media_files.is_empty() {
+        for file in &media_files {
             let ext = file
                 .extension()
                 .and_then(|e| e.to_str())

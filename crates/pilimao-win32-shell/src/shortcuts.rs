@@ -22,6 +22,7 @@ pub enum ShortcutAction {
     VolumeDown,
     ToggleShuffle,
     CycleRepeat,
+    OpenFiles,
     OpenJumpToFile,
     EnqueueSelected,
     ToggleEqualizerWindow,
@@ -67,6 +68,7 @@ pub fn map_virtual_key(vk: u32, mods: Modifiers) -> Option<ShortcutAction> {
             0x43 => Some(ShortcutAction::PauseToggle),     // C
             0x56 => Some(ShortcutAction::Stop),            // V
             0x42 => Some(ShortcutAction::NextTrack),       // B
+            0x4C => Some(ShortcutAction::OpenFiles),       // L (Open File(s))
             0x53 => Some(ShortcutAction::ToggleShuffle),   // S
             0x52 => Some(ShortcutAction::CycleRepeat),     // R
             0x4A => Some(ShortcutAction::OpenJumpToFile),  // J
@@ -108,6 +110,10 @@ mod tests {
         assert_eq!(
             map_virtual_key(b'B' as u32, none),
             Some(ShortcutAction::NextTrack)
+        );
+        assert_eq!(
+            map_virtual_key(b'L' as u32, none),
+            Some(ShortcutAction::OpenFiles)
         );
         assert_eq!(
             map_virtual_key(b'J' as u32, none),
