@@ -1,7 +1,8 @@
 //! Native Windows 10/11 borderless 3-window Win32 shell with:
+//! - Re-entrancy-safe `Win32Effect` deferred dispatch (no Win32 calls inside `RefCell` borrows)
 //! - `SetWindowRgn` custom skin masks (`region.txt`)
 //! - `BeginDeferWindowPos` atomic multi-window magnetic docking / BFS linked movement
-//! - `WM_DROPFILES` drag-and-drop for audio tracks, `.m3u`/`.m3u8`/`.pls`, `.wsz`, `.eqf`
+//! - `WM_DROPFILES` drag-and-drop & `GetOpenFileNameW` multi-select file picker
 //! - 1x / 2x / 3x nearest-neighbor BGRA rendering & classic Winamp keyboard shortcuts.
 
 use pilimao_audio_engine::OutputMode;
@@ -44,6 +45,7 @@ mod win_impl {
     use std::cell::RefCell;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::PathBuf;
     use std::ptr;
     use std::time::Duration;
@@ -74,11 +76,12 @@ mod win_impl {
     use windows::Win32::UI::WindowsAndMessaging::{
         BeginDeferWindowPos, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
         DeferWindowPos, DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, IDC_ARROW,
-        LoadCursorW, LoadIconW, MSG, PostQuitMessage, RegisterClassW, SPI_GETWORKAREA, SW_HIDE,
-        SW_MINIMIZE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, ShowWindow,
-        SystemParametersInfoW, TranslateMessage, WM_CHAR, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
-        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_TIMER,
-        WNDCLASSW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_POPUP,
+        LoadCursorW, LoadIconW, MSG, PostQuitMessage, RegisterClassW, SHOW_WINDOW_CMD,
+        SPI_GETWORKAREA, SW_HIDE, SW_MINIMIZE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer,
+        ShowWindow, SystemParametersInfoW, TranslateMessage, WM_ACTIVATE, WM_CAPTURECHANGED,
+        WM_CHAR, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_TIMER, WNDCLASSW,
+        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_POPUP,
     };
     use windows::core::{PCWSTR, PWSTR, w};
 
@@ -93,9 +96,24 @@ mod win_impl {
 
     struct DragState {
         window: WindowId,
+        /// Screen-coordinate offset `(cursor.x - window.rect.x, cursor.y - window.rect.y)` at drag start.
         grab_offset_x: i32,
         grab_offset_y: i32,
         resizing_pl: bool,
+    }
+
+    /// Win32 side-effects queued inside `SHELL_STATE` borrow and executed strictly AFTER
+    /// releasing the borrow, preventing synchronous Win32 re-entrancy (`WM_CAPTURECHANGED`,
+    /// `WM_WINDOWPOSCHANGED`, `WM_SHOWWINDOW`, `WM_PAINT`, etc.) from ever causing a `RefCell` panic.
+    enum Win32Effect {
+        SetCapture(HWND),
+        ReleaseCapture,
+        ShowWindow(HWND, SHOW_WINDOW_CMD),
+        PostQuit,
+        DeferPositions(Vec<(HWND, WindowRect)>),
+        ApplyRegions(Vec<(HWND, Vec<Polygon>, u32)>),
+        InvalidateAll([HWND; 3]),
+        OpenFileDialog(HWND),
     }
 
     struct ShellApp {
@@ -107,6 +125,7 @@ mod win_impl {
         engine: AudioEngine,
         vis_reader: Option<VisTapReader>,
         ui: UiRenderState,
+        active_window: WindowId,
         drag: Option<DragState>,
         tick_counter: u32,
     }
@@ -199,34 +218,34 @@ mod win_impl {
             engine,
             vis_reader,
             ui,
+            active_window: WindowId::Main,
             drag: None,
             tick_counter: 0,
         };
 
-        // Apply initial region.txt masks and show all three windows.
-        apply_all_window_regions(&app);
-        for &hwnd in &app.hwnds {
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-            }
-        }
-        unsafe {
-            SetTimer(
-                Some(app.hwnds[WindowId::Main.index()]),
-                TIMER_UI_TICK,
-                16,
-                None,
-            );
-        }
+        let initial_regions = collect_all_regions(&app);
+        let show_hwnds = app.hwnds;
+        let main_hwnd = app.hwnds[WindowId::Main.index()];
 
         // If launched by double-clicking an audio file or playlist, start playing right away.
         if !app.playlist.is_empty() && app.playlist.jump_to(0).is_some() {
             start_playing_current(&mut app);
         }
 
+        // Store state BEFORE showing windows so initial WM_PAINT renders cleanly.
         SHELL_STATE.with(|slot| {
             *slot.borrow_mut() = Some(app);
         });
+
+        execute_effects(vec![Win32Effect::ApplyRegions(initial_regions)]);
+        for hwnd in show_hwnds {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+            }
+        }
+        unsafe {
+            SetTimer(Some(main_hwnd), TIMER_UI_TICK, 16, None);
+        }
 
         // Standard Win32 message pump
         unsafe {
@@ -267,8 +286,91 @@ mod win_impl {
             .find(|&id| app.hwnds[id.index()] == hwnd)
     }
 
+    fn collect_region_for(app: &ShellApp, id: WindowId) -> (HWND, Vec<Polygon>, u32) {
+        let hwnd = app.hwnds[id.index()];
+        let state = app.docking.state(id);
+        let scale = app.docking.scale();
+        let polys: &[Polygon] = match (id, state.shaded) {
+            (WindowId::Main, false) => &app.skin.regions.normal,
+            (WindowId::Main, true) => &app.skin.regions.window_shade,
+            (WindowId::Equalizer, false) => &app.skin.regions.equalizer,
+            (WindowId::Equalizer, true) => &app.skin.regions.equalizer_ws,
+            (WindowId::Playlist, _) => &[],
+        };
+        (hwnd, polys.to_vec(), scale)
+    }
+
+    fn collect_all_regions(app: &ShellApp) -> Vec<(HWND, Vec<Polygon>, u32)> {
+        WindowId::ALL
+            .into_iter()
+            .map(|id| collect_region_for(app, id))
+            .collect()
+    }
+
+    fn map_position_updates(
+        app: &ShellApp,
+        updates: &[(WindowId, WindowRect)],
+    ) -> Vec<(HWND, WindowRect)> {
+        updates
+            .iter()
+            .map(|&(id, rect)| (app.hwnds[id.index()], rect))
+            .collect()
+    }
+
+    /// Executes all queued Win32 side-effects safely AFTER `SHELL_STATE` borrow has been dropped.
+    fn execute_effects(effects: Vec<Win32Effect>) {
+        for effect in effects {
+            match effect {
+                Win32Effect::SetCapture(hwnd) => unsafe {
+                    SetCapture(hwnd);
+                },
+                Win32Effect::ReleaseCapture => unsafe {
+                    let _ = ReleaseCapture();
+                },
+                Win32Effect::ShowWindow(hwnd, cmd) => unsafe {
+                    let _ = ShowWindow(hwnd, cmd);
+                },
+                Win32Effect::PostQuit => unsafe {
+                    PostQuitMessage(0);
+                },
+                Win32Effect::DeferPositions(updates) => {
+                    apply_deferred_positions(&updates);
+                }
+                Win32Effect::ApplyRegions(regions) => {
+                    for (hwnd, polys, scale) in regions {
+                        apply_window_region(hwnd, &polys, scale);
+                    }
+                }
+                Win32Effect::InvalidateAll(hwnds) => {
+                    for hwnd in hwnds {
+                        unsafe {
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                    }
+                }
+                Win32Effect::OpenFileDialog(owner) => {
+                    let selected = open_files_dialog(owner);
+                    let mut post_effects = Vec::new();
+                    SHELL_STATE.with(|slot| {
+                        if let Ok(mut borrow) = slot.try_borrow_mut()
+                            && let Some(app) = borrow.as_mut()
+                        {
+                            app.ui.pressed_transport = None;
+                            if !selected.is_empty() {
+                                ingest_paths(app, &selected, &mut post_effects);
+                            } else {
+                                post_effects.push(Win32Effect::InvalidateAll(app.hwnds));
+                            }
+                        }
+                    });
+                    execute_effects(post_effects);
+                }
+            }
+        }
+    }
+
     /// Atomically repositions multiple windows in a single DWM frame via `BeginDeferWindowPos`.
-    fn apply_deferred_positions(app: &ShellApp, updates: &[(WindowId, WindowRect)]) {
+    fn apply_deferred_positions(updates: &[(HWND, WindowRect)]) {
         if updates.is_empty() {
             return;
         }
@@ -276,8 +378,7 @@ mod win_impl {
             let Ok(mut hdwp) = BeginDeferWindowPos(updates.len() as i32) else {
                 return;
             };
-            for &(id, rect) in updates {
-                let hwnd = app.hwnds[id.index()];
+            for &(hwnd, rect) in updates {
                 if let Ok(next) = DeferWindowPos(
                     hdwp,
                     hwnd,
@@ -296,19 +397,7 @@ mod win_impl {
     }
 
     /// Applies scaled `region.txt` custom polygon masks using Win32 `SetWindowRgn`.
-    fn apply_window_region(app: &ShellApp, id: WindowId) {
-        let hwnd = app.hwnds[id.index()];
-        let state = app.docking.state(id);
-        let scale = app.docking.scale();
-
-        let polys: &[Polygon] = match (id, state.shaded) {
-            (WindowId::Main, false) => &app.skin.regions.normal,
-            (WindowId::Main, true) => &app.skin.regions.window_shade,
-            (WindowId::Equalizer, false) => &app.skin.regions.equalizer,
-            (WindowId::Equalizer, true) => &app.skin.regions.equalizer_ws,
-            (WindowId::Playlist, _) => &[],
-        };
-
+    fn apply_window_region(hwnd: HWND, polys: &[Polygon], scale: u32) {
         unsafe {
             if polys.is_empty() {
                 SetWindowRgn(hwnd, None, true);
@@ -336,20 +425,6 @@ mod win_impl {
 
             // Ownership of `combined` transfers to Windows upon `SetWindowRgn`.
             SetWindowRgn(hwnd, combined, true);
-        }
-    }
-
-    fn apply_all_window_regions(app: &ShellApp) {
-        for id in WindowId::ALL {
-            apply_window_region(app, id);
-        }
-    }
-
-    fn invalidate_all(app: &ShellApp) {
-        for &hwnd in &app.hwnds {
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
         }
     }
 
@@ -413,7 +488,12 @@ mod win_impl {
         }
     }
 
-    fn handle_shortcut(app: &mut ShellApp, action: ShortcutAction, active_win: WindowId) {
+    fn handle_shortcut(
+        app: &mut ShellApp,
+        action: ShortcutAction,
+        active_win: WindowId,
+        effects: &mut Vec<Win32Effect>,
+    ) {
         match action {
             ShortcutAction::PreviousTrack => {
                 if app.playlist.advance_previous().is_some() {
@@ -462,7 +542,9 @@ mod win_impl {
                 app.playlist.cycle_repeat();
             }
             ShortcutAction::OpenFiles => {
-                // Handled outside the SHELL_STATE borrow inside wnd_proc for modal dialog safety.
+                effects.push(Win32Effect::OpenFileDialog(
+                    app.hwnds[WindowId::Main.index()],
+                ));
             }
             ShortcutAction::OpenJumpToFile => {
                 app.ui.jump_open = !app.ui.jump_open;
@@ -482,23 +564,19 @@ mod win_impl {
                 let vis = !app.docking.state(WindowId::Equalizer).visible;
                 app.docking.set_visible(WindowId::Equalizer, vis);
                 app.ui.eq_visible = vis;
-                unsafe {
-                    let _ = ShowWindow(
-                        app.hwnds[WindowId::Equalizer.index()],
-                        if vis { SW_SHOW } else { SW_HIDE },
-                    );
-                }
+                effects.push(Win32Effect::ShowWindow(
+                    app.hwnds[WindowId::Equalizer.index()],
+                    if vis { SW_SHOW } else { SW_HIDE },
+                ));
             }
             ShortcutAction::TogglePlaylistWindow => {
                 let vis = !app.docking.state(WindowId::Playlist).visible;
                 app.docking.set_visible(WindowId::Playlist, vis);
                 app.ui.pl_visible = vis;
-                unsafe {
-                    let _ = ShowWindow(
-                        app.hwnds[WindowId::Playlist.index()],
-                        if vis { SW_SHOW } else { SW_HIDE },
-                    );
-                }
+                effects.push(Win32Effect::ShowWindow(
+                    app.hwnds[WindowId::Playlist.index()],
+                    if vis { SW_SHOW } else { SW_HIDE },
+                ));
             }
             ShortcutAction::CycleScale => {
                 let next_scale = match app.docking.scale() {
@@ -507,16 +585,22 @@ mod win_impl {
                     _ => 1,
                 };
                 let updates = app.docking.set_scale(next_scale);
-                apply_deferred_positions(app, &updates);
-                apply_all_window_regions(app);
+                effects.push(Win32Effect::DeferPositions(map_position_updates(
+                    app, &updates,
+                )));
+                effects.push(Win32Effect::ApplyRegions(collect_all_regions(app)));
             }
             ShortcutAction::ToggleWindowShade => {
                 let updates = app.docking.toggle_windowshade(active_win);
-                apply_deferred_positions(app, &updates);
-                apply_window_region(app, active_win);
+                effects.push(Win32Effect::DeferPositions(map_position_updates(
+                    app, &updates,
+                )));
+                effects.push(Win32Effect::ApplyRegions(vec![collect_region_for(
+                    app, active_win,
+                )]));
             }
         }
-        invalidate_all(app);
+        effects.push(Win32Effect::InvalidateAll(app.hwnds));
     }
 
     /// Opens the native Windows multi-select file picker dialog (`GetOpenFileNameW`)
@@ -547,9 +631,6 @@ mod win_impl {
             return Vec::new();
         }
 
-        // Parse null-separated result buffer:
-        // - Single selection: "<full_path>\0\0"
-        // - Multi selection:  "<dir>\0<name1>\0<name2>\0\0"
         let mut parts: Vec<OsString> = Vec::new();
         let mut start = 0usize;
         while start < file_buf.len() {
@@ -575,7 +656,7 @@ mod win_impl {
         }
     }
 
-    fn ingest_paths(app: &mut ShellApp, paths: &[PathBuf]) {
+    fn ingest_paths(app: &mut ShellApp, paths: &[PathBuf], effects: &mut Vec<Win32Effect>) {
         let mut added_tracks = false;
         let was_empty = app.playlist.is_empty();
 
@@ -590,7 +671,7 @@ mod win_impl {
                 "wsz" => {
                     if let Ok(new_skin) = load_skin(path) {
                         app.skin = new_skin;
-                        apply_all_window_regions(app);
+                        effects.push(Win32Effect::ApplyRegions(collect_all_regions(app)));
                     }
                 }
                 "eqf" => {
@@ -622,10 +703,10 @@ mod win_impl {
             }
             start_playing_current(app);
         }
-        invalidate_all(app);
+        effects.push(Win32Effect::InvalidateAll(app.hwnds));
     }
 
-    fn handle_drop_files(app: &mut ShellApp, hdrop: HDROP) {
+    fn extract_dropped_paths(hdrop: HDROP) -> Vec<PathBuf> {
         let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
         let mut paths = Vec::with_capacity(count as usize);
 
@@ -642,21 +723,105 @@ mod win_impl {
         unsafe {
             DragFinish(hdrop);
         }
-
-        ingest_paths(app, &paths);
+        paths
     }
 
-    unsafe extern "system" fn wnd_proc(
+    fn begin_drag(
+        app: &mut ShellApp,
+        win_id: WindowId,
         hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
+        fallback_sx: i32,
+        fallback_sy: i32,
+        resizing_pl: bool,
+        effects: &mut Vec<Win32Effect>,
+    ) {
+        let rect = app.docking.state(win_id).rect;
+        let mut pt = POINT::default();
+        let (grab_offset_x, grab_offset_y) = if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+            (pt.x - rect.x, pt.y - rect.y)
+        } else {
+            (fallback_sx, fallback_sy)
+        };
+        app.drag = Some(DragState {
+            window: win_id,
+            grab_offset_x,
+            grab_offset_y,
+            resizing_pl,
+        });
+        effects.push(Win32Effect::SetCapture(hwnd));
+    }
+
+    fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Prevent white flash during repaints without borrowing SHELL_STATE.
+        if msg == WM_ERASEBKGND {
+            return LRESULT(1);
+        }
+
+        // Paint strictly outside SHELL_STATE borrow to avoid re-entrancy inside BeginPaint.
+        if msg == WM_PAINT {
+            let surface_opt = SHELL_STATE.with(|slot| {
+                let Ok(borrow) = slot.try_borrow() else {
+                    return None;
+                };
+                let app = borrow.as_ref()?;
+                let win_id = window_id_from_hwnd(app, hwnd)?;
+                let scale = app.docking.scale();
+                let st = app.docking.state(win_id);
+                let active = app.active_window == win_id;
+                let surf = match win_id {
+                    WindowId::Main => ShellRenderer::render_main(
+                        &app.skin,
+                        &app.ui,
+                        &app.playlist,
+                        st.shaded,
+                        active,
+                        scale,
+                    ),
+                    WindowId::Equalizer => ShellRenderer::render_equalizer(
+                        &app.skin, &app.ui, st.shaded, active, scale,
+                    ),
+                    WindowId::Playlist => ShellRenderer::render_playlist(
+                        &app.skin,
+                        &app.ui,
+                        &app.playlist,
+                        (st.logical_width as u32, st.normal_logical_height as u32),
+                        st.shaded,
+                        active,
+                        scale,
+                    ),
+                };
+                Some(surf)
+            });
+
+            if let Some(surface) = surface_opt {
+                present_surface(hwnd, &surface);
+                return LRESULT(0);
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+
+        // Pre-read Win32 cursor/drop data before borrowing SHELL_STATE.
+        let cursor_pos = if msg == WM_MOUSEMOVE {
+            let mut pt = POINT::default();
+            unsafe { GetCursorPos(&mut pt) }.ok().map(|()| pt)
+        } else {
+            None
+        };
+        let dropped_paths = if msg == WM_DROPFILES {
+            Some(extract_dropped_paths(HDROP(wparam.0 as *mut _)))
+        } else {
+            None
+        };
+
         let mut handled = false;
-        let mut open_dialog_owner: Option<HWND> = None;
+        let mut effects: Vec<Win32Effect> = Vec::new();
 
         SHELL_STATE.with(|slot| {
-            let mut borrow = slot.borrow_mut();
+            // Re-entrancy guard: if Windows dispatches a nested notification message while
+            // SHELL_STATE is borrowed, gracefully defer to DefWindowProcW instead of panicking.
+            let Ok(mut borrow) = slot.try_borrow_mut() else {
+                return;
+            };
             let Some(app) = borrow.as_mut() else {
                 return;
             };
@@ -665,32 +830,16 @@ mod win_impl {
             };
 
             match msg {
-                WM_PAINT => {
-                    let scale = app.docking.scale();
-                    let st = app.docking.state(win_id);
-                    let surface = match win_id {
-                        WindowId::Main => ShellRenderer::render_main(
-                            &app.skin,
-                            &app.ui,
-                            &app.playlist,
-                            st.shaded,
-                            true,
-                            scale,
-                        ),
-                        WindowId::Equalizer => ShellRenderer::render_equalizer(
-                            &app.skin, &app.ui, st.shaded, true, scale,
-                        ),
-                        WindowId::Playlist => ShellRenderer::render_playlist(
-                            &app.skin,
-                            &app.ui,
-                            &app.playlist,
-                            (st.logical_width as u32, st.normal_logical_height as u32),
-                            st.shaded,
-                            true,
-                            scale,
-                        ),
-                    };
-                    present_surface(hwnd, &surface);
+                WM_ACTIVATE => {
+                    if (wparam.0 & 0xFFFF) != 0 {
+                        app.active_window = win_id;
+                        effects.push(Win32Effect::InvalidateAll(app.hwnds));
+                    }
+                }
+                WM_CAPTURECHANGED => {
+                    app.drag = None;
+                    app.ui.pressed_transport = None;
+                    effects.push(Win32Effect::InvalidateAll(app.hwnds));
                     handled = true;
                 }
                 WM_TIMER => {
@@ -712,11 +861,25 @@ mod win_impl {
                             app.ui.bitrate_kbps = fmt.bitrate_kbps.unwrap_or(0);
                             app.ui.is_stereo = fmt.channels >= 2;
                         }
-                        invalidate_all(app);
+                        effects.push(Win32Effect::InvalidateAll(app.hwnds));
+                        handled = true;
+                    }
+                }
+                WM_MOUSEWHEEL => {
+                    if win_id == WindowId::Playlist && !app.playlist.is_empty() {
+                        let delta = ((wparam.0 >> 16) as u16) as i16;
+                        if delta > 0 {
+                            app.ui.pl_scroll_offset = app.ui.pl_scroll_offset.saturating_sub(2);
+                        } else if delta < 0 {
+                            let max_off = app.playlist.len().saturating_sub(1);
+                            app.ui.pl_scroll_offset = (app.ui.pl_scroll_offset + 2).min(max_off);
+                        }
+                        effects.push(Win32Effect::InvalidateAll(app.hwnds));
                         handled = true;
                     }
                 }
                 WM_LBUTTONDOWN => {
+                    app.active_window = win_id;
                     let scale = app.docking.scale() as i32;
                     let sx = (lparam.0 & 0xFFFF) as i16 as i32;
                     let sy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -727,21 +890,22 @@ mod win_impl {
                     match win_id {
                         WindowId::Main => match hit_test_main(lx, ly, st.shaded) {
                             MainHit::TitleBar => {
-                                app.drag = Some(DragState {
-                                    window: win_id,
-                                    grab_offset_x: sx,
-                                    grab_offset_y: sy,
-                                    resizing_pl: false,
-                                });
-                                unsafe { SetCapture(hwnd) };
+                                begin_drag(app, win_id, hwnd, sx, sy, false, &mut effects);
                             }
-                            MainHit::Minimize => unsafe {
-                                let _ = ShowWindow(hwnd, SW_MINIMIZE);
-                            },
+                            MainHit::Minimize => {
+                                effects.push(Win32Effect::ShowWindow(hwnd, SW_MINIMIZE));
+                            }
                             MainHit::WindowShade => {
-                                handle_shortcut(app, ShortcutAction::ToggleWindowShade, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::ToggleWindowShade,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
-                            MainHit::Close => unsafe { PostQuitMessage(0) },
+                            MainHit::Close => {
+                                effects.push(Win32Effect::PostQuit);
+                            }
                             MainHit::VisToggle => {
                                 app.ui.vis_mode = app.ui.vis_mode.cycle();
                             }
@@ -762,58 +926,99 @@ mod win_impl {
                                 }
                             }
                             MainHit::ToggleEq => {
-                                handle_shortcut(app, ShortcutAction::ToggleEqualizerWindow, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::ToggleEqualizerWindow,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::TogglePl => {
-                                handle_shortcut(app, ShortcutAction::TogglePlaylistWindow, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::TogglePlaylistWindow,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::Prev => {
                                 app.ui.pressed_transport = Some(0);
-                                handle_shortcut(app, ShortcutAction::PreviousTrack, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::PreviousTrack,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::Play => {
                                 app.ui.pressed_transport = Some(1);
-                                handle_shortcut(app, ShortcutAction::Play, win_id);
+                                handle_shortcut(app, ShortcutAction::Play, win_id, &mut effects);
                             }
                             MainHit::Pause => {
                                 app.ui.pressed_transport = Some(2);
-                                handle_shortcut(app, ShortcutAction::PauseToggle, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::PauseToggle,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::Stop => {
                                 app.ui.pressed_transport = Some(3);
-                                handle_shortcut(app, ShortcutAction::Stop, win_id);
+                                handle_shortcut(app, ShortcutAction::Stop, win_id, &mut effects);
                             }
                             MainHit::Next => {
                                 app.ui.pressed_transport = Some(4);
-                                handle_shortcut(app, ShortcutAction::NextTrack, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::NextTrack,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::Eject => {
                                 app.ui.pressed_transport = Some(5);
-                                open_dialog_owner = Some(app.hwnds[WindowId::Main.index()]);
+                                effects.push(Win32Effect::OpenFileDialog(
+                                    app.hwnds[WindowId::Main.index()],
+                                ));
                             }
                             MainHit::ToggleShuffle => {
-                                handle_shortcut(app, ShortcutAction::ToggleShuffle, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::ToggleShuffle,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::CycleRepeat => {
-                                handle_shortcut(app, ShortcutAction::CycleRepeat, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::CycleRepeat,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             MainHit::None => {}
                         },
                         WindowId::Equalizer => match hit_test_eq(lx, ly, st.shaded) {
                             EqHit::TitleBar => {
-                                app.drag = Some(DragState {
-                                    window: win_id,
-                                    grab_offset_x: sx,
-                                    grab_offset_y: sy,
-                                    resizing_pl: false,
-                                });
-                                unsafe { SetCapture(hwnd) };
+                                begin_drag(app, win_id, hwnd, sx, sy, false, &mut effects);
                             }
                             EqHit::WindowShade => {
-                                handle_shortcut(app, ShortcutAction::ToggleWindowShade, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::ToggleWindowShade,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             EqHit::Close => {
-                                handle_shortcut(app, ShortcutAction::ToggleEqualizerWindow, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::ToggleEqualizerWindow,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             EqHit::ToggleOn => {
                                 app.ui.eq.enabled = !app.ui.eq.enabled;
@@ -838,28 +1043,26 @@ mod win_impl {
                             app.ui.pl_scroll_offset,
                         ) {
                             PlHit::TitleBar => {
-                                app.drag = Some(DragState {
-                                    window: win_id,
-                                    grab_offset_x: sx,
-                                    grab_offset_y: sy,
-                                    resizing_pl: false,
-                                });
-                                unsafe { SetCapture(hwnd) };
+                                begin_drag(app, win_id, hwnd, sx, sy, false, &mut effects);
                             }
                             PlHit::ResizeCorner => {
-                                app.drag = Some(DragState {
-                                    window: win_id,
-                                    grab_offset_x: sx,
-                                    grab_offset_y: sy,
-                                    resizing_pl: true,
-                                });
-                                unsafe { SetCapture(hwnd) };
+                                begin_drag(app, win_id, hwnd, sx, sy, true, &mut effects);
                             }
                             PlHit::WindowShade => {
-                                handle_shortcut(app, ShortcutAction::ToggleWindowShade, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::ToggleWindowShade,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             PlHit::Close => {
-                                handle_shortcut(app, ShortcutAction::TogglePlaylistWindow, win_id);
+                                handle_shortcut(
+                                    app,
+                                    ShortcutAction::TogglePlaylistWindow,
+                                    win_id,
+                                    &mut effects,
+                                );
                             }
                             PlHit::TrackRow(idx) => {
                                 app.playlist.set_selected(Some(idx));
@@ -867,15 +1070,25 @@ mod win_impl {
                             PlHit::None => {}
                         },
                     }
-                    invalidate_all(app);
+                    effects.push(Win32Effect::InvalidateAll(app.hwnds));
                     handled = true;
                 }
                 WM_LBUTTONDBLCLK => {
-                    if win_id == WindowId::Playlist {
-                        let scale = app.docking.scale() as i32;
-                        let lx = ((lparam.0 & 0xFFFF) as i16 as i32) / scale;
-                        let ly = (((lparam.0 >> 16) & 0xFFFF) as i16 as i32) / scale;
-                        let st = app.docking.state(win_id);
+                    let scale = app.docking.scale() as i32;
+                    let lx = ((lparam.0 & 0xFFFF) as i16 as i32) / scale;
+                    let ly = (((lparam.0 >> 16) & 0xFFFF) as i16 as i32) / scale;
+                    let st = app.docking.state(win_id);
+
+                    // Classic Winamp behavior: double-clicking any titlebar toggles Windowshade!
+                    if ly < pilimao_skin_wsz::SHADE_HEIGHT {
+                        handle_shortcut(
+                            app,
+                            ShortcutAction::ToggleWindowShade,
+                            win_id,
+                            &mut effects,
+                        );
+                        handled = true;
+                    } else if win_id == WindowId::Playlist {
                         if let PlHit::TrackRow(idx) = hit_test_playlist(
                             lx,
                             ly,
@@ -886,30 +1099,31 @@ mod win_impl {
                         ) && app.playlist.jump_to(idx).is_some()
                         {
                             start_playing_current(app);
-                            invalidate_all(app);
+                            effects.push(Win32Effect::InvalidateAll(app.hwnds));
                         }
                         handled = true;
                     }
                 }
                 WM_MOUSEMOVE => {
-                    if let Some(drag) = &app.drag {
-                        let mut pt = POINT::default();
-                        if unsafe { GetCursorPos(&mut pt) }.is_ok() {
-                            if drag.resizing_pl {
-                                let cur = app.docking.state(WindowId::Playlist).rect;
-                                let new_rect = app.docking.resize_playlist(
-                                    (pt.x - cur.x).max(275),
-                                    (pt.y - cur.y).max(116),
-                                );
-                                apply_deferred_positions(app, &[(WindowId::Playlist, new_rect)]);
-                            } else {
-                                let updates = app.docking.drag_window(
-                                    drag.window,
-                                    pt.x - drag.grab_offset_x,
-                                    pt.y - drag.grab_offset_y,
-                                );
-                                apply_deferred_positions(app, &updates);
-                            }
+                    if let (Some(drag), Some(pt)) = (&app.drag, cursor_pos) {
+                        if drag.resizing_pl {
+                            let cur = app.docking.state(WindowId::Playlist).rect;
+                            let new_rect = app
+                                .docking
+                                .resize_playlist((pt.x - cur.x).max(275), (pt.y - cur.y).max(116));
+                            effects.push(Win32Effect::DeferPositions(vec![(
+                                app.hwnds[WindowId::Playlist.index()],
+                                new_rect,
+                            )]));
+                        } else {
+                            let updates = app.docking.drag_window(
+                                drag.window,
+                                pt.x - drag.grab_offset_x,
+                                pt.y - drag.grab_offset_y,
+                            );
+                            effects.push(Win32Effect::DeferPositions(map_position_updates(
+                                app, &updates,
+                            )));
                         }
                         handled = true;
                     }
@@ -917,13 +1131,15 @@ mod win_impl {
                 WM_LBUTTONUP => {
                     app.ui.pressed_transport = None;
                     if app.drag.take().is_some() {
-                        let _ = unsafe { ReleaseCapture() };
+                        effects.push(Win32Effect::ReleaseCapture);
                     }
-                    invalidate_all(app);
+                    effects.push(Win32Effect::InvalidateAll(app.hwnds));
                     handled = true;
                 }
                 WM_DROPFILES => {
-                    handle_drop_files(app, HDROP(wparam.0 as *mut _));
+                    if let Some(paths) = dropped_paths {
+                        ingest_paths(app, &paths, &mut effects);
+                    }
                     handled = true;
                 }
                 WM_KEYDOWN => {
@@ -931,7 +1147,6 @@ mod win_impl {
                     let mods = read_modifiers();
                     if app.ui.jump_open {
                         if vk == 0x0D {
-                            // Enter -> jump to top fuzzy match
                             if let Some(top) = app.ui.jump_matches.first()
                                 && app.playlist.jump_to(top.playlist_index).is_some()
                             {
@@ -939,25 +1154,25 @@ mod win_impl {
                             }
                             app.ui.jump_open = false;
                             app.ui.jump_query.clear();
-                            invalidate_all(app);
+                            effects.push(Win32Effect::InvalidateAll(app.hwnds));
                             handled = true;
                         } else if vk == 0x08 {
-                            // Backspace
                             app.ui.jump_query.pop();
                             app.ui.jump_matches =
                                 app.jump_matcher.search(&app.playlist, &app.ui.jump_query);
-                            invalidate_all(app);
+                            effects.push(Win32Effect::InvalidateAll(app.hwnds));
                             handled = true;
                         } else if vk == 0x1B {
-                            handle_shortcut(app, ShortcutAction::CloseJumpOverlay, win_id);
+                            handle_shortcut(
+                                app,
+                                ShortcutAction::CloseJumpOverlay,
+                                win_id,
+                                &mut effects,
+                            );
                             handled = true;
                         }
                     } else if let Some(action) = map_virtual_key(vk, mods) {
-                        if action == ShortcutAction::OpenFiles {
-                            open_dialog_owner = Some(app.hwnds[WindowId::Main.index()]);
-                        } else {
-                            handle_shortcut(app, action, win_id);
-                        }
+                        handle_shortcut(app, action, win_id, &mut effects);
                         handled = true;
                     }
                 }
@@ -969,13 +1184,13 @@ mod win_impl {
                         app.ui.jump_query.push(ch);
                         app.ui.jump_matches =
                             app.jump_matcher.search(&app.playlist, &app.ui.jump_query);
-                        invalidate_all(app);
+                        effects.push(Win32Effect::InvalidateAll(app.hwnds));
                         handled = true;
                     }
                 }
                 WM_DESTROY => {
                     if win_id == WindowId::Main {
-                        unsafe { PostQuitMessage(0) };
+                        effects.push(Win32Effect::PostQuit);
                     }
                     handled = true;
                 }
@@ -983,25 +1198,25 @@ mod win_impl {
             }
         });
 
-        // Show modal GetOpenFileNameW strictly outside the SHELL_STATE borrow to prevent re-entrancy!
-        if let Some(owner) = open_dialog_owner {
-            let selected = open_files_dialog(owner);
-            SHELL_STATE.with(|slot| {
-                if let Some(app) = slot.borrow_mut().as_mut() {
-                    app.ui.pressed_transport = None;
-                    if !selected.is_empty() {
-                        ingest_paths(app, &selected);
-                    } else {
-                        invalidate_all(app);
-                    }
-                }
-            });
-        }
+        // Execute queued Win32 API calls strictly OUTSIDE the SHELL_STATE borrow!
+        execute_effects(effects);
 
         if handled {
             LRESULT(0)
         } else {
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
+    }
+
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        catch_unwind(AssertUnwindSafe(|| {
+            handle_message(hwnd, msg, wparam, lparam)
+        }))
+        .unwrap_or(LRESULT(0))
     }
 }

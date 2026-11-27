@@ -118,7 +118,7 @@ pub fn hit_test_main(lx: i32, ly: i32, shaded: bool) -> MainHit {
         if (164..211).contains(&lx) {
             return MainHit::ToggleShuffle;
         }
-        if (210..238).contains(&lx) {
+        if (214..242).contains(&lx) {
             return MainHit::CycleRepeat;
         }
     }
@@ -191,13 +191,13 @@ pub fn hit_test_playlist(
         return PlHit::None;
     }
 
-    if lx >= logical_w - 20 && ly >= logical_h - 20 {
+    if lx >= logical_w - 16 && ly >= logical_h - 16 {
         return PlHit::ResizeCorner;
     }
 
-    let list_bottom = logical_h - 38;
-    if ly >= 22 && ly < list_bottom && lx >= 6 && lx < logical_w - 12 {
-        let row = ((ly - 22) / 9) as usize;
+    let list_bottom = logical_h - 24;
+    if ly >= 20 && ly < list_bottom && lx >= 5 && lx < logical_w - 10 {
+        let row = ((ly - 20) / 10) as usize;
         return PlHit::TrackRow(scroll_offset + row);
     }
 

@@ -34,35 +34,35 @@ impl Default for VisColors {
 }
 
 impl VisColors {
-    /// 100% clean-room phosphor-emerald / amber / crimson visualization palette.
+    /// 100% clean-room minimalist Obsidian & Mint visualization palette.
     #[must_use]
     pub fn clean_room() -> Self {
         Self {
             colors: [
-                Rgb::new(10, 14, 20),    // 0: background
-                Rgb::new(28, 40, 52),    // 1: grid dots
-                Rgb::new(255, 64, 64),   // 2: spectrum top (hot peak)
-                Rgb::new(255, 96, 48),   // 3
-                Rgb::new(255, 132, 36),  // 4
-                Rgb::new(255, 168, 28),  // 5
-                Rgb::new(248, 204, 24),  // 6
-                Rgb::new(220, 232, 32),  // 7
-                Rgb::new(172, 240, 44),  // 8
-                Rgb::new(116, 242, 68),  // 9
-                Rgb::new(64, 236, 96),   // 10
-                Rgb::new(40, 224, 116),  // 11
-                Rgb::new(28, 208, 128),  // 12
-                Rgb::new(22, 188, 124),  // 13
-                Rgb::new(18, 164, 114),  // 14
-                Rgb::new(16, 138, 98),   // 15
-                Rgb::new(14, 112, 82),   // 16
-                Rgb::new(12, 86, 66),    // 17: spectrum bottom
-                Rgb::new(220, 255, 240), // 18: oscilloscope brightest
-                Rgb::new(128, 244, 192), // 19
-                Rgb::new(64, 220, 152),  // 20
-                Rgb::new(36, 176, 116),  // 21
-                Rgb::new(20, 120, 80),   // 22: oscilloscope dimmest
-                Rgb::new(240, 248, 255), // 23: peak hold dot
+                Rgb::new(12, 15, 19),    // 0: obsidian LCD background
+                Rgb::new(20, 25, 32),    // 1: ultra-subtle background dots
+                Rgb::new(245, 178, 68),  // 2: spectrum top (soft warm amber peak)
+                Rgb::new(224, 196, 98),  // 3
+                Rgb::new(182, 224, 148), // 4
+                Rgb::new(136, 238, 196), // 5
+                Rgb::new(104, 236, 208), // 6
+                Rgb::new(94, 234, 212),  // 7: primary mint accent
+                Rgb::new(82, 222, 200),  // 8
+                Rgb::new(72, 208, 188),  // 9
+                Rgb::new(62, 194, 176),  // 10
+                Rgb::new(54, 178, 162),  // 11
+                Rgb::new(46, 162, 148),  // 12
+                Rgb::new(38, 144, 132),  // 13
+                Rgb::new(32, 126, 116),  // 14
+                Rgb::new(26, 108, 100),  // 15
+                Rgb::new(22, 90, 84),    // 16
+                Rgb::new(18, 74, 70),    // 17: spectrum bottom
+                Rgb::new(236, 250, 248), // 18: oscilloscope brightest
+                Rgb::new(148, 240, 222), // 19
+                Rgb::new(94, 234, 212),  // 20
+                Rgb::new(56, 176, 160),  // 21
+                Rgb::new(30, 110, 102),  // 22: oscilloscope dimmest
+                Rgb::new(232, 240, 246), // 23: crisp off-white peak cap
             ],
         }
     }

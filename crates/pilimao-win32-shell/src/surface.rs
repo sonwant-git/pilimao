@@ -1,6 +1,6 @@
 //! Cross-platform 32-bit BGRA surface and 1x/2x/3x Nearest-Neighbor integer upscaler.
 
-use pilimao_skin_wsz::{Rgb, SpriteImage, draw_bitmap_char_5x6};
+use pilimao_skin_wsz::{Rgb, SpriteImage, draw_bitmap_char_5x6, micro_glyph_3x5};
 
 /// Top-down 32-bit BGRA pixel buffer matching Win32 `BI_RGB` DIBSection layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +102,26 @@ impl BgraSurface {
                     self.set_pixel(tx, ty, Rgb::new(px[0], px[1], px[2]));
                 }
             }
+        }
+    }
+
+    /// Draws compact 3x5 micro ASCII text clipped to `max_w` pixels.
+    pub fn draw_micro_text(&mut self, x: u32, y: u32, max_w: u32, text: &str, color: Rgb) {
+        let mut cursor_x = x;
+        let limit_x = x.saturating_add(max_w);
+        for ch in text.chars() {
+            if cursor_x + 3 > limit_x {
+                break;
+            }
+            let rows = micro_glyph_3x5(ch);
+            for (dy, &bits) in rows.iter().enumerate() {
+                for dx in 0..3u32 {
+                    if bits & (1 << (2 - dx)) != 0 {
+                        self.set_pixel(cursor_x + dx, y + dy as u32, color);
+                    }
+                }
+            }
+            cursor_x += 4;
         }
     }
 

@@ -21,16 +21,16 @@ impl Default for PleditStyle {
 }
 
 impl PleditStyle {
-    /// Clean-room dark slate & phosphor-green Playlist styling.
+    /// Clean-room minimalist Obsidian & Mint Playlist styling.
     #[must_use]
     pub fn clean_room() -> Self {
         Self {
-            normal: Rgb::new(112, 232, 160),
-            current: Rgb::new(255, 255, 255),
-            normal_bg: Rgb::new(12, 16, 22),
-            selected_bg: Rgb::new(36, 76, 132),
-            mb_bg: Rgb::new(12, 16, 22),
-            mb_fg: Rgb::new(160, 220, 190),
+            normal: Rgb::new(178, 192, 204),
+            current: Rgb::new(94, 234, 212),
+            normal_bg: Rgb::new(14, 17, 22),
+            selected_bg: Rgb::new(32, 48, 56),
+            mb_bg: Rgb::new(14, 17, 22),
+            mb_fg: Rgb::new(150, 170, 184),
             font: "Consolas".to_string(),
         }
     }

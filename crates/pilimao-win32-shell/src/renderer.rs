@@ -7,6 +7,17 @@ use pilimao_skin_wsz::{EQ_HEIGHT, EQ_WIDTH, MAIN_HEIGHT, MAIN_WIDTH, Rgb, SHADE_
 
 use crate::surface::BgraSurface;
 
+const UI_MINT: Rgb = Rgb::new(94, 234, 212);
+const UI_TITLE_ACTIVE: Rgb = Rgb::new(224, 232, 240);
+const UI_TITLE_INACTIVE: Rgb = Rgb::new(124, 136, 150);
+const UI_MUTED: Rgb = Rgb::new(112, 124, 138);
+const UI_AMBER: Rgb = Rgb::new(245, 178, 68);
+const UI_BORDER: Rgb = Rgb::new(48, 56, 68);
+const UI_BORDER_LIGHT: Rgb = Rgb::new(62, 72, 86);
+const UI_LCD_BG: Rgb = Rgb::new(12, 15, 19);
+const UI_PANEL_BG: Rgb = Rgb::new(24, 28, 34);
+const UI_CLOSE: Rgb = Rgb::new(232, 114, 114);
+
 /// Classic Winamp visualization display mode inside Main window's 76x16 LCD area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VisMode {
@@ -56,7 +67,7 @@ pub struct UiRenderState {
 impl Default for UiRenderState {
     fn default() -> Self {
         Self {
-            title_marquee: "PILIMAO 0.1 - READY TO PLAY".to_string(),
+            title_marquee: "DROP AUDIO FILES OR PRESS [L]".to_string(),
             marquee_offset: 0,
             playback_state: PlaybackState::Stopped,
             elapsed_secs: 0,
@@ -97,17 +108,23 @@ impl ShellRenderer {
     ) -> BgraSurface {
         let h = if shaded { SHADE_HEIGHT } else { MAIN_HEIGHT } as u32;
         let w = MAIN_WIDTH as u32;
-        let mut surf = BgraSurface::filled(w, h, Rgb::new(16, 20, 26));
+        let mut surf = BgraSurface::filled(w, h, UI_PANEL_BG);
+        let title_col = if active {
+            UI_TITLE_ACTIVE
+        } else {
+            UI_TITLE_INACTIVE
+        };
 
         if shaded {
             let ty = if active { 29 } else { 42 };
             surf.blit_sprite(&skin.sprites.titlebar, 27, ty, 0, 0, w, SHADE_HEIGHT as u32);
+            surf.draw_micro_text(10, 5, 80, "PILIMAO", title_col);
             let time_str = format!(
                 "{:02}:{:02}",
                 state.elapsed_secs / 60,
                 state.elapsed_secs % 60
             );
-            surf.draw_ascii_text(126, 4, 40, &time_str, Rgb::new(112, 240, 160));
+            surf.draw_micro_text(122, 5, 36, &time_str, UI_MINT);
             return surf.upscale_nearest(scale);
         }
 
@@ -115,17 +132,17 @@ impl ShellRenderer {
         surf.blit_sprite(&skin.sprites.main, 0, 0, 0, 0, w, h);
         let tb_y = if active { 0 } else { 15 };
         surf.blit_sprite(&skin.sprites.titlebar, 27, tb_y, 0, 0, w, 14);
-        surf.draw_ascii_text(10, 4, 90, "PILIMAO", Rgb::new(220, 240, 255));
+        surf.draw_micro_text(10, 5, 96, "PILIMAO", title_col);
 
-        // 2. Play/Pause/Stop indicator glyph (24, 28, 9x9)
+        // 2. Play/Pause/Stop indicator glyph (20, 26, 9x9)
         let pp_x = match state.playback_state {
             PlaybackState::Playing => 0,
             PlaybackState::Paused => 9,
             PlaybackState::Stopped => 18,
         };
-        surf.blit_sprite(&skin.sprites.playpaus, pp_x, 0, 24, 28, 9, 9);
+        surf.blit_sprite(&skin.sprites.playpaus, pp_x, 0, 20, 26, 9, 9);
 
-        // 3. Time digits (4 digits: MM:SS via numbers sprite)
+        // 3. Time digits (MM:SS) with crisp colon dots
         let mins = (state.elapsed_secs / 60).min(99);
         let secs = state.elapsed_secs % 60;
         let digits = [
@@ -134,43 +151,46 @@ impl ShellRenderer {
             (secs / 10) as u32,
             (secs % 10) as u32,
         ];
-        let digit_xs = [48u32, 60, 78, 90];
+        let digit_xs = [46u32, 58, 76, 88];
         for (i, &d) in digits.iter().enumerate() {
-            surf.blit_sprite(&skin.sprites.numbers, d * 9, 0, digit_xs[i], 26, 9, 13);
+            surf.blit_sprite(&skin.sprites.numbers, d * 9, 0, digit_xs[i], 25, 9, 13);
         }
+        // Crisp 2x2 colon dots between MM and SS
+        surf.fill_rect(71, 28, 2, 2, UI_MINT);
+        surf.fill_rect(71, 33, 2, 2, UI_MINT);
 
-        // 4. 76x16 Visualization area at (24, 43)
-        render_vis_box(&mut surf, skin, state, 24, 43);
+        // 4. 76x16 Visualization area centered cleanly inside left OLED panel
+        render_vis_box(&mut surf, skin, state, 18, 43);
 
-        // 5. Scrolling marquee title (111, 27, 152px)
+        // 5. Scrolling marquee title inside right OLED strip (112, 26, 150px)
         let marquee = build_marquee_slice(&state.title_marquee, state.marquee_offset, 25);
-        surf.draw_ascii_text(112, 27, 152, &marquee, Rgb::new(112, 240, 160));
+        surf.draw_ascii_text(112, 26, 150, &marquee, UI_MINT);
 
-        // 6. Bitrate & Sample Rate LCD readouts
+        // 6. Bitrate & Sample Rate LCD readouts (micro 3x5 digits fit cleanly inside wells)
         let kbps = if state.bitrate_kbps > 0 {
             format!("{:03}", state.bitrate_kbps.min(999))
         } else {
             "---".to_string()
         };
         let khz = format!("{:02}", state.sample_rate_khz.min(99));
-        surf.draw_ascii_text(111, 44, 18, &kbps, Rgb::new(112, 240, 160));
-        surf.draw_ascii_text(156, 44, 14, &khz, Rgb::new(112, 240, 160));
+        surf.draw_micro_text(113, 44, 16, &kbps, UI_MINT);
+        surf.draw_micro_text(159, 44, 12, &khz, UI_MINT);
 
-        // Bit-Perfect LED badge
+        // Bit-Perfect subtle amber indicator pill
         if state.bit_perfect {
-            surf.draw_ascii_text(176, 44, 30, "BP", Rgb::new(255, 212, 72));
+            surf.draw_micro_text(192, 44, 16, "BP", UI_AMBER);
         }
 
-        // 7. Stereo / Mono LEDs (212, 41)
+        // 7. Stereo / Mono indicators (212, 40)
         let stereo_y = if state.is_stereo { 0 } else { 12 };
         let mono_y = if state.is_stereo { 12 } else { 0 };
-        surf.blit_sprite(&skin.sprites.monoster, 0, stereo_y, 239, 41, 29, 12);
-        surf.blit_sprite(&skin.sprites.monoster, 29, mono_y, 212, 41, 29, 12);
+        surf.blit_sprite(&skin.sprites.monoster, 0, stereo_y, 238, 40, 29, 12);
+        surf.blit_sprite(&skin.sprites.monoster, 29, mono_y, 211, 40, 29, 12);
 
         // 8. Volume slider (107, 57, 68x13)
         let vol_frame = ((state.volume.clamp(0.0, 1.0) * 27.0).round() as u32).min(27);
         surf.blit_sprite(&skin.sprites.volume, 0, vol_frame * 15, 107, 57, 68, 13);
-        let vol_thumb_x = 107 + ((state.volume.clamp(0.0, 1.0) * 51.0).round() as u32);
+        let vol_thumb_x = 107 + ((state.volume.clamp(0.0, 1.0) * 54.0).round() as u32);
         surf.blit_sprite(&skin.sprites.volume, 15, 422, vol_thumb_x, 58, 14, 11);
 
         // 9. Balance slider (177, 57, 38x13)
@@ -200,13 +220,17 @@ impl ShellRenderer {
             12,
         );
 
-        // 11. Seek Posbar (16, 72, 248x10)
+        // 11. Seek Posbar (16, 72, 248x10) with live progress mint fill
         surf.blit_sprite(&skin.sprites.posbar, 0, 0, 16, 72, 248, 10);
         let seek_ratio = if state.duration_secs > 0 {
             (state.elapsed_secs as f64 / state.duration_secs as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
+        let fill_w = (seek_ratio * 242.0).round() as u32;
+        if fill_w > 0 {
+            surf.fill_rect(19, 76, fill_w, 2, UI_MINT);
+        }
         let pos_thumb_x = 16 + ((seek_ratio * 219.0).round() as u32);
         surf.blit_sprite(&skin.sprites.posbar, 248, 0, pos_thumb_x, 72, 29, 10);
 
@@ -246,11 +270,16 @@ impl ShellRenderer {
             } else {
                 0
             },
-            210,
+            214,
             89,
             28,
             15,
         );
+
+        // Repeat One subtle indicator dot
+        if playlist.repeat_mode() == RepeatMode::One {
+            surf.draw_micro_text(245, 94, 16, "1", UI_AMBER);
+        }
 
         surf.upscale_nearest(scale)
     }
@@ -266,38 +295,50 @@ impl ShellRenderer {
     ) -> BgraSurface {
         let w = EQ_WIDTH as u32;
         let h = if shaded { SHADE_HEIGHT } else { EQ_HEIGHT } as u32;
-        let mut surf = BgraSurface::filled(w, h, Rgb::new(16, 20, 26));
+        let mut surf = BgraSurface::filled(w, h, UI_PANEL_BG);
+        let title_col = if active {
+            UI_TITLE_ACTIVE
+        } else {
+            UI_TITLE_INACTIVE
+        };
 
         if shaded {
             let ty = if active { 0 } else { 15 };
             surf.blit_sprite(&skin.sprites.eq_ex, 0, ty, 0, 0, w, SHADE_HEIGHT as u32);
-            surf.draw_ascii_text(8, 4, 120, "PILIMAO EQ", Rgb::new(220, 240, 255));
+            surf.draw_micro_text(10, 5, 120, "EQUALIZER", title_col);
             return surf.upscale_nearest(scale);
         }
 
         surf.blit_sprite(&skin.sprites.eqmain, 0, 0, 0, 0, w, h);
-        surf.blit_sprite(&skin.sprites.eqmain, 0, 134, 0, 0, w, 14);
-        surf.draw_ascii_text(10, 4, 110, "EQUALIZER", Rgb::new(220, 240, 255));
+        let tb_y = if active { 134 } else { 149 };
+        surf.blit_sprite(&skin.sprites.eqmain, 0, tb_y, 0, 0, w, 14);
+        surf.draw_micro_text(10, 5, 110, "EQUALIZER", title_col);
 
-        // ON indicator pill (14, 18, 25x12)
-        let on_color = if state.eq.enabled {
-            Rgb::new(82, 240, 148)
-        } else {
-            Rgb::new(48, 60, 72)
-        };
-        surf.fill_rect(14, 18, 25, 12, Rgb::new(20, 26, 36));
-        surf.draw_rect_outline(14, 18, 25, 12, on_color);
-        surf.draw_ascii_text(19, 21, 16, "ON", on_color);
+        // Sleek ON toggle pill (14, 18, 25x12)
+        let on_fg = if state.eq.enabled { UI_MINT } else { UI_MUTED };
+        let on_border = if state.eq.enabled { UI_MINT } else { UI_BORDER };
+        surf.fill_rect(14, 18, 25, 12, Rgb::new(28, 33, 40));
+        surf.draw_rect_outline(14, 18, 25, 12, on_border);
+        if state.eq.enabled {
+            surf.fill_rect(16, 19, 21, 1, UI_MINT);
+        }
+        surf.draw_micro_text(22, 22, 12, "ON", on_fg);
 
         // Live 10-band EQ curve preview in (86, 17, 113x19)
         render_eq_curve(&mut surf, &state.eq, 86, 17, 113, 19);
 
         // Preamp slider (x=21, y=38..101)
-        draw_eq_slider(&mut surf, 21, 38, state.eq.preamp_db);
+        draw_eq_slider(&mut surf, 21, 38, state.eq.preamp_db, state.eq.enabled);
 
         // 10 classic EQ band sliders (x=78 + i*18)
         for (i, &gain_db) in state.eq.bands_db.iter().enumerate() {
-            draw_eq_slider(&mut surf, 78 + (i as u32) * 18, 38, gain_db);
+            draw_eq_slider(
+                &mut surf,
+                78 + (i as u32) * 18,
+                38,
+                gain_db,
+                state.eq.enabled,
+            );
         }
 
         surf.upscale_nearest(scale)
@@ -322,59 +363,88 @@ impl ShellRenderer {
             logical_h.max(116)
         };
         let mut surf = BgraSurface::filled(w, h, skin.pledit_style.normal_bg);
+        let title_col = if active {
+            UI_TITLE_ACTIVE
+        } else {
+            UI_TITLE_INACTIVE
+        };
 
         // Top title bar
         let tb_src_y = if active { 0 } else { 21 };
-        let tb_h = if shaded { SHADE_HEIGHT as u32 } else { 20 };
+        let tb_h = if shaded { SHADE_HEIGHT as u32 } else { 16 };
         for tx in (0..w).step_by(25) {
             let bw = 25.min(w - tx);
             surf.blit_sprite(&skin.sprites.pledit, 0, tb_src_y, tx, 0, bw, tb_h);
         }
-        surf.draw_ascii_text(
-            10,
-            4,
-            w.saturating_sub(40),
-            "PLAYLIST EDITOR",
-            Rgb::new(220, 240, 255),
-        );
+        surf.fill_rect(4, 5, 2, 6, if active { UI_MINT } else { UI_BORDER });
+        surf.draw_micro_text(10, 5, w.saturating_sub(42), "PLAYLIST", title_col);
+
+        // Minimalist Shade & Close glyphs on Playlist titlebar
+        let icon_col = if active { UI_TITLE_ACTIVE } else { UI_MUTED };
+        let close_col = if active { UI_CLOSE } else { UI_MUTED };
+        surf.fill_rect(w - 20, 4, 5, 1, icon_col);
+        surf.fill_rect(w - 20, 6, 5, 1, icon_col);
+        surf.fill_rect(w - 20, 8, 5, 1, icon_col);
+        for d in 0..5u32 {
+            surf.set_pixel(w - 10 + d, 4 + d, close_col);
+            surf.set_pixel(w - 6 - d, 4 + d, close_col);
+        }
 
         if shaded {
+            surf.draw_rect_outline(0, 0, w, h, UI_BORDER_LIGHT);
             return surf.upscale_nearest(scale);
         }
 
-        // Frame borders & bottom toolbar (38px tall)
-        let list_top = 20u32;
-        let list_bottom = h.saturating_sub(38);
-        surf.draw_rect_outline(0, 0, w, h, Rgb::new(68, 82, 102));
-        surf.fill_rect(0, list_bottom, w, 38, Rgb::new(40, 48, 60));
-        surf.draw_rect_outline(0, list_bottom, w, 38, Rgb::new(72, 86, 106));
+        // Sleek outer border & bottom status footer (24px tall)
+        let list_top = 18u32;
+        let footer_h = 24u32;
+        let list_bottom = h.saturating_sub(footer_h);
+        surf.fill_rect(0, list_bottom, w, footer_h, UI_PANEL_BG);
+        surf.fill_rect(1, list_bottom, w - 2, 1, UI_BORDER);
+        surf.draw_rect_outline(0, 0, w, h, UI_BORDER_LIGHT);
+
+        // Subtle diagonal resize grip in bottom-right corner
+        for i in 0..3u32 {
+            let offset = i * 3;
+            for p in 0..(9 - offset) {
+                surf.set_pixel(w - 4 - p, h - 12 + offset + p, UI_MUTED);
+            }
+        }
 
         // Bottom status summary
-        let footer = format!("TRACKS: {}  [Q]QUEUE [J]JUMP", playlist.len());
-        surf.draw_ascii_text(
-            10,
-            list_bottom + 14,
-            w.saturating_sub(20),
-            &footer,
-            Rgb::new(160, 212, 184),
-        );
+        let footer = format!("{} TRACKS   [L]OPEN  [J]JUMP  [Q]QUEUE", playlist.len());
+        surf.draw_micro_text(8, list_bottom + 10, w.saturating_sub(24), &footer, UI_MUTED);
 
-        // Track rows (9px each)
-        let row_h = 9u32;
-        let max_rows = (list_bottom.saturating_sub(list_top + 4) / row_h) as usize;
-        let list_w = w.saturating_sub(18);
+        // Track rows (10px each) + slim right scrollbar
+        let row_h = 10u32;
+        let max_rows = (list_bottom.saturating_sub(list_top + 2) / row_h) as usize;
+        let list_w = w.saturating_sub(14);
+
+        // Scrollbar track
+        let sb_x = w - 8;
+        let sb_h = list_bottom.saturating_sub(list_top + 4);
+        if sb_h > 8 {
+            surf.fill_rect(sb_x, list_top + 2, 4, sb_h, Rgb::new(22, 26, 32));
+            let total = playlist.len().max(1);
+            let thumb_h = ((max_rows as u32 * sb_h) / total as u32).clamp(8, sb_h);
+            let max_scroll = playlist.len().saturating_sub(max_rows).max(1);
+            let thumb_y = list_top
+                + 2
+                + ((state.pl_scroll_offset.min(max_scroll) as u32 * (sb_h - thumb_h))
+                    / max_scroll as u32);
+            surf.fill_rect(sb_x, thumb_y, 4, thumb_h, UI_BORDER_LIGHT);
+        }
 
         if state.jump_open {
-            // Jump-to-File (J) interactive fuzzy filter overlay
-            surf.fill_rect(6, list_top + 2, list_w, 12, Rgb::new(22, 34, 52));
-            surf.draw_rect_outline(6, list_top + 2, list_w, 12, Rgb::new(112, 232, 160));
+            surf.fill_rect(6, list_top + 1, list_w, 13, Rgb::new(22, 30, 38));
+            surf.draw_rect_outline(6, list_top + 1, list_w, 13, UI_MINT);
             let prompt = format!("JUMP: {}_", state.jump_query);
-            surf.draw_ascii_text(
+            surf.draw_micro_text(
                 9,
                 list_top + 5,
                 list_w.saturating_sub(6),
                 &prompt,
-                Rgb::new(255, 255, 255),
+                UI_TITLE_ACTIVE,
             );
 
             for (row, m) in state
@@ -393,8 +463,24 @@ impl ShellRenderer {
                 if row == 0 {
                     surf.fill_rect(6, ry, list_w, row_h, skin.pledit_style.selected_bg);
                 }
-                surf.draw_ascii_text(8, ry + 1, list_w.saturating_sub(4), &text, col);
+                surf.draw_micro_text(8, ry + 2, list_w.saturating_sub(4), &text, col);
             }
+        } else if playlist.is_empty() {
+            let cy = list_top + list_bottom.saturating_sub(list_top) / 2;
+            surf.draw_micro_text(
+                14,
+                cy.saturating_sub(6),
+                list_w.saturating_sub(14),
+                "NO TRACKS LOADED",
+                UI_TITLE_ACTIVE,
+            );
+            surf.draw_micro_text(
+                14,
+                cy + 3,
+                list_w.saturating_sub(14),
+                "DROP FILES OR CLICK EJECT / [L]",
+                UI_MUTED,
+            );
         } else {
             for row in 0..max_rows {
                 let idx = state.pl_scroll_offset + row;
@@ -403,19 +489,41 @@ impl ShellRenderer {
                 };
                 let ry = list_top + 2 + (row as u32) * row_h;
                 if playlist.selected_index() == Some(idx) {
-                    surf.fill_rect(6, ry, list_w, row_h, skin.pledit_style.selected_bg);
+                    surf.fill_rect(5, ry, list_w, row_h, skin.pledit_style.selected_bg);
                 }
-                let color = if playlist.current_index() == Some(idx) {
+                let is_current = playlist.current_index() == Some(idx);
+                let color = if is_current {
                     skin.pledit_style.current
                 } else {
                     skin.pledit_style.normal
                 };
+                if is_current {
+                    // Subtle active left accent bar
+                    surf.fill_rect(5, ry + 1, 2, row_h - 2, UI_MINT);
+                }
+
+                let dur_str = entry.formatted_duration();
+                let dur_w = if dur_str.is_empty() {
+                    0
+                } else {
+                    (dur_str.len() as u32) * 4 + 4
+                };
+                if !dur_str.is_empty() {
+                    surf.draw_micro_text(
+                        5 + list_w.saturating_sub(dur_w),
+                        ry + 2,
+                        dur_w,
+                        &dur_str,
+                        if is_current { UI_MINT } else { UI_MUTED },
+                    );
+                }
+
                 let q_badge = playlist
                     .queue_position(idx)
                     .map(|p| format!("[{p}] "))
                     .unwrap_or_default();
                 let line = format!("{}. {q_badge}{}", idx + 1, entry.display_title());
-                surf.draw_ascii_text(8, ry + 1, list_w.saturating_sub(4), &line, color);
+                surf.draw_micro_text(9, ry + 2, list_w.saturating_sub(dur_w + 8), &line, color);
             }
         }
 
@@ -428,17 +536,12 @@ fn render_vis_box(surf: &mut BgraSurface, skin: &WszSkin, state: &UiRenderState,
     let h = 16u32;
     surf.fill_rect(x, y, w, h, skin.vis_colors.background());
 
-    // Classic subtle grid dots
-    for gy in (1..h).step_by(2) {
-        for gx in (1..w).step_by(2) {
-            surf.set_pixel(x + gx, y + gy, skin.vis_colors.grid_dots());
-        }
-    }
+    // Ultra-subtle baseline hairline for clean hi-fi look
+    surf.fill_rect(x, y + h - 1, w, 1, skin.vis_colors.grid_dots());
 
     match state.vis_mode {
         VisMode::Off => {}
         VisMode::Spectrum => {
-            // 19 classic spectrum bars, 3px wide + 1px gap = 76px exact!
             for band in 0..SPECTRUM_BANDS {
                 let bx = x + (band as u32) * 4;
                 let bar_h =
@@ -474,44 +577,53 @@ fn render_vis_box(surf: &mut BgraSurface, skin: &WszSkin, state: &UiRenderState,
     }
 }
 
-fn draw_eq_slider(surf: &mut BgraSurface, x: u32, y: u32, gain_db: f64) {
+fn draw_eq_slider(surf: &mut BgraSurface, x: u32, y: u32, gain_db: f64, enabled: bool) {
     let norm = ((gain_db - EQ_MIN_DB) / (EQ_MAX_DB - EQ_MIN_DB)).clamp(0.0, 1.0);
-    // Track fill colored green (0dB) -> amber/red (high) -> cyan (cut)
-    let bar_col = if gain_db > 3.0 {
-        Rgb::new(248, 124, 64)
-    } else if gain_db < -3.0 {
-        Rgb::new(64, 184, 240)
+    // Slim centered vertical groove (4px wide)
+    surf.fill_rect(x + 5, y + 1, 4, 61, UI_LCD_BG);
+    surf.draw_rect_outline(x + 4, y, 6, 63, UI_BORDER);
+    // Subtle 0 dB center tick
+    surf.fill_rect(x + 2, y + 31, 10, 1, UI_BORDER);
+
+    let bar_col = if !enabled {
+        Rgb::new(62, 72, 84)
+    } else if gain_db > 6.0 {
+        UI_AMBER
     } else {
-        Rgb::new(82, 232, 140)
+        UI_MINT
     };
-    let thumb_y = y + (((1.0 - norm) * 51.0).round() as u32);
-    surf.fill_rect(x + 2, y + 2, 10, 59, Rgb::new(14, 18, 26));
-    // Fill from center (y + 31) to thumb
+
+    let thumb_y = y + (((1.0 - norm) * 53.0).round() as u32);
     let center_y = y + 31;
-    let (top, bot) = if thumb_y < center_y {
-        (thumb_y + 5, center_y)
+    let (top, bot) = if thumb_y + 4 < center_y {
+        (thumb_y + 4, center_y)
     } else {
-        (center_y, thumb_y + 5)
+        (center_y, thumb_y + 4)
     };
     if bot > top {
-        surf.fill_rect(x + 4, top, 6, bot - top, bar_col);
+        surf.fill_rect(x + 6, top, 2, bot - top, bar_col);
     }
-    // Slider cap
-    surf.fill_rect(x + 1, thumb_y, 12, 11, Rgb::new(104, 120, 140));
-    surf.draw_rect_outline(x + 1, thumb_y, 12, 11, Rgb::new(200, 218, 238));
+
+    // Refined slim horizontal fader cap (12x9)
+    surf.fill_rect(x + 1, thumb_y, 12, 9, Rgb::new(56, 64, 76));
+    surf.draw_rect_outline(x + 1, thumb_y, 12, 9, UI_BORDER_LIGHT);
+    surf.fill_rect(
+        x + 3,
+        thumb_y + 4,
+        8,
+        1,
+        if enabled { UI_MINT } else { UI_MUTED },
+    );
 }
 
 fn render_eq_curve(surf: &mut BgraSurface, eq: &EqSettings, x: u32, y: u32, w: u32, h: u32) {
-    surf.fill_rect(x, y, w, h, Rgb::new(10, 14, 20));
+    surf.fill_rect(x, y, w, h, UI_LCD_BG);
     let mid_y = y + h / 2;
-    for dx in 0..w {
-        surf.set_pixel(x + dx, mid_y, Rgb::new(34, 48, 64));
+    for dx in (0..w).step_by(2) {
+        surf.set_pixel(x + dx, mid_y, Rgb::new(34, 42, 52));
     }
-    let curve_col = if eq.enabled {
-        Rgb::new(82, 240, 148)
-    } else {
-        Rgb::new(90, 104, 118)
-    };
+    let curve_col = if eq.enabled { UI_MINT } else { UI_MUTED };
+    let mut prev_py: Option<u32> = None;
     for dx in 0..w {
         let pos = (dx as f64 / (w.saturating_sub(1).max(1)) as f64) * 9.0;
         let idx = (pos.floor() as usize).min(8);
@@ -524,7 +636,16 @@ fn render_eq_curve(surf: &mut BgraSurface, eq: &EqSettings, x: u32, y: u32, w: u
         };
         let norm = (db - EQ_MIN_DB) / (EQ_MAX_DB - EQ_MIN_DB);
         let py = y + (((1.0 - norm) * (h - 1) as f64).round() as u32).min(h - 1);
-        surf.set_pixel(x + dx, py, curve_col);
+        // Connect vertical steps smoothly so the curve never breaks into scattered dots
+        if let Some(prev) = prev_py {
+            let (lo, hi) = if prev < py { (prev, py) } else { (py, prev) };
+            for cy in lo..=hi {
+                surf.set_pixel(x + dx, cy, curve_col);
+            }
+        } else {
+            surf.set_pixel(x + dx, py, curve_col);
+        }
+        prev_py = Some(py);
     }
 }
 
